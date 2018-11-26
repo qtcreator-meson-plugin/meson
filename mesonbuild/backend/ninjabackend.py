@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import re
 import shlex
@@ -150,6 +151,7 @@ class NinjaBackend(backends.Backend):
         self.ninja_filename = 'build.ninja'
         self.fortran_deps = {}
         self.all_outputs = {}
+        self.introspection_data = {}
 
     def create_target_alias(self, to_target, outfile):
         # We need to use aliases for targets that might be used as directory
@@ -239,6 +241,26 @@ int dummy;
         # fully created.
         os.replace(tempfilename, outfilename)
         self.generate_compdb()
+        self.store_introspection()
+
+    def store_introspection(self):
+        builddir = self.environment.get_build_dir()
+        datadir = os.path.join(builddir, 'meson-introspection')
+        datafile = os.path.join(datadir, 'targets.json')
+        if not os.path.exists(datadir):
+            os.mkdir(datadir)
+        data = []
+        for k in sorted(self.introspection_data.keys()):
+            target = self.introspection_data[k]
+            target['compile_commands'] = list(target['compile_commands'].values())
+            data.append(target)
+        data = json.dumps(data, sort_keys=True)
+        data_differs = True
+        if os.path.exists(datafile):
+            with open(datafile, 'r') as f:
+                data_differs = (data != f.read())
+        with open(datafile, 'w') as f:
+            f.write(data)
 
     # http://clang.llvm.org/docs/JSONCompilationDatabase.html
     def generate_compdb(self):
@@ -321,6 +343,42 @@ int dummy;
                 return False
         return True
 
+    def create_target_introspection(self, target):
+        introspection_target = self.introspection_data[target.get_id()] = {
+            'name': target.get_basename(),
+            'id': target.get_id()
+        }
+        fname = target.get_filename()
+        if isinstance(fname, list):
+            fname = [os.path.join(target.subdir, x) for x in fname]
+        else:
+            fname = os.path.join(target.subdir, fname)
+        introspection_target['filename'] = fname
+        if isinstance(target, build.Executable):
+            typename = 'executable'
+        elif isinstance(target, build.SharedLibrary):
+            typename = 'shared library'
+        elif isinstance(target, build.StaticLibrary):
+            typename = 'static library'
+        elif isinstance(target, build.CustomTarget):
+            typename = 'custom'
+        elif isinstance(target, build.RunTarget):
+            typename = 'run'
+        else:
+            typename = 'unknown'
+        introspection_target['type'] = typename
+        if target.should_install():
+            introspection_target['installed'] = True
+            outdirs, custom_install_dir = target.get_install_dir(self.environment)
+            introspection_target['install_filename'] = os.path.join(self.environment.get_prefix(),
+                                                                    outdirs[0],
+                                                                    os.path.basename(self.get_target_filename(target)))
+        else:
+            introspection_target['installed'] = False
+        introspection_target['build_by_default'] = target.build_by_default
+        self.introspection_data[target.get_id()]['compile_commands'] = {}
+
+
     def generate_target(self, target, outfile):
         if isinstance(target, build.CustomTarget):
             self.generate_custom_target(target, outfile)
@@ -330,6 +388,7 @@ int dummy;
         if name in self.processed_targets:
             return
         self.processed_targets[name] = True
+        self.create_target_introspection(target)
         # Generate rules for all dependency targets
         self.process_target_dependencies(target, outfile)
         # If target uses a language that cannot link to C objects,
@@ -2052,6 +2111,32 @@ rule FORTRAN_DEP_HACK%s
         commands += compiler.get_include_args(self.get_target_private_dir(target), False)
         return commands
 
+    def create_per_source_introspection(self, compiler, target, src, commands, is_generated):
+        build_dir = self.environment.get_build_dir()
+
+        p = tuple(commands.to_native(copy=True))
+        key = (p, compiler.get_language(), target.is_cross)
+        if key not in self.introspection_data[target.get_id()]['compile_commands']:
+            if target.is_cross:
+                additional_args = compiler.get_cross_extra_flags(self.environment, False)
+            else:
+                additional_args = []
+
+            additional_args.extend(compiler.get_compile_only_args())
+
+            introspect_dict = {
+                'parameters': p + tuple(additional_args),
+                'compiler': compiler.get_exelist(),
+                'language': compiler.get_language(),
+                'sources': [],
+                'other_sources': []
+            }
+            self.introspection_data[target.get_id()]['compile_commands'][key] = introspect_dict
+        if is_generated:
+            self.introspection_data[target.get_id()]['compile_commands'][key]['other_sources'].append(src.absolute_path(self.environment.get_source_dir(), build_dir))
+        else:
+            self.introspection_data[target.get_id()]['compile_commands'][key]['sources'].append(src.absolute_path(self.environment.get_source_dir(), build_dir))
+
     def generate_single_compile(self, target, outfile, src, is_generated=False, header_deps=[], order_deps=[]):
         """
         Compiles C/C++, ObjC/ObjC++, Fortran, and D sources
@@ -2062,6 +2147,8 @@ rule FORTRAN_DEP_HACK%s
         compiler = get_compiler_for_source(target.compilers.values(), src)
         commands = self._generate_single_compile(target, compiler, is_generated)
         commands = CompilerArgs(commands.compiler, commands)
+
+        self.create_per_source_introspection(compiler, target, src, commands, is_generated)
 
         build_dir = self.environment.get_build_dir()
         if isinstance(src, File):
