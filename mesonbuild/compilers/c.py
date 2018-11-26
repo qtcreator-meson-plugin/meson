@@ -427,7 +427,13 @@ class CCompiler(Compiler):
                 args += env.coredata.get_external_preprocess_args(self.language)
             elif mode == 'compile':
                 # Add CFLAGS/CXXFLAGS/OBJCFLAGS/OBJCXXFLAGS from the env
-                args += env.coredata.get_external_args(self.language)
+                sys_args = env.coredata.get_external_args(self.language)
+                # Apparently it is a thing to inject linker flags _both_
+                # via CFLAGS and LDFLAGS. Even though the latter are
+                # also used during linking. These flags can break
+                # argument checks. Thanks, Autotools.
+                cleaned_sys_args = self.remove_linkerlike_args(sys_args)
+                args += cleaned_sys_args
             elif mode == 'link':
                 # Add LDFLAGS from the env
                 args += env.coredata.get_external_link_args(self.language)
@@ -435,6 +441,9 @@ class CCompiler(Compiler):
         # extra_args must override all other arguments, so we add them last
         args += extra_args
         return args
+
+    def remove_linkerlike_args(self, args):
+        return [x for x in args if not x.startswith('-Wl')]
 
     def compiles(self, code, env, *, extra_args=None, dependencies=None, mode='compile'):
         with self._build_wrapper(code, env, extra_args, dependencies, mode) as p:
