@@ -2114,8 +2114,8 @@ rule FORTRAN_DEP_HACK%s
     def create_per_source_introspection(self, compiler, target, src, commands, is_generated):
         build_dir = self.environment.get_build_dir()
 
-        p = tuple(commands.to_native(copy=True))
-        key = (p, compiler.get_language(), target.is_cross)
+        p = commands.to_native(copy=True)
+        key = (compiler.get_language(), target.is_cross)
         if key not in self.introspection_data[target.get_id()]['compile_commands']:
             if target.is_cross:
                 additional_args = compiler.get_cross_extra_flags(self.environment, False)
@@ -2125,7 +2125,7 @@ rule FORTRAN_DEP_HACK%s
             additional_args.extend(compiler.get_compile_only_args())
 
             introspect_dict = {
-                'parameters': p + tuple(additional_args),
+                'parameters': p + additional_args,
                 'compiler': compiler.get_exelist(),
                 'language': compiler.get_language(),
                 'sources': [],
